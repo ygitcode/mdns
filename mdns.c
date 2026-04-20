@@ -31,12 +31,6 @@
 #undef recvfrom
 #endif
 
-static char addrbuffer[64];
-static char entrybuffer[256];
-static char namebuffer[256];
-static char sendbuffer[1024];
-static mdns_record_txt_t txtbuffer[128];
-
 static struct sockaddr_in service_address_ipv4;
 static struct sockaddr_in6 service_address_ipv6;
 
@@ -112,6 +106,16 @@ ip_address_to_string(char* buffer, size_t capacity, const struct sockaddr* addr,
 	return ipv4_address_to_string(buffer, capacity, (const struct sockaddr_in*)addr, addrlen);
 }
 
+// Length-safe comparison of an mdns_string_t against a NUL-terminated C string.
+// Returns 1 if equal, 0 otherwise.
+static int
+mdns_string_match(mdns_string_t s, const char* cstr) {
+	if (!s.str || !cstr)
+		return 0;
+	size_t len = strlen(cstr);
+	return (s.length == len) && (memcmp(s.str, cstr, len) == 0);
+}
+
 // Callback handling parsing answers to queries sent
 static int
 query_callback(int sock, const struct sockaddr* from, size_t addrlen, mdns_entry_type_t entry,
@@ -122,6 +126,10 @@ query_callback(int sock, const struct sockaddr* from, size_t addrlen, mdns_entry
 	(void)sizeof(query_id);
 	(void)sizeof(name_length);
 	(void)sizeof(user_data);
+	char addrbuffer[64];
+	char entrybuffer[256];
+	char namebuffer[256];
+	mdns_record_txt_t txtbuffer[128];
 	mdns_string_t fromaddrstr = ip_address_to_string(addrbuffer, sizeof(addrbuffer), from, addrlen);
 	const char* entrytype = (entry == MDNS_ENTRYTYPE_ANSWER) ?
                                 "answer" :
@@ -141,17 +149,19 @@ query_callback(int sock, const struct sockaddr* from, size_t addrlen, mdns_entry
 		       MDNS_STRING_FORMAT(fromaddrstr), entrytype, MDNS_STRING_FORMAT(entrystr),
 		       MDNS_STRING_FORMAT(srv.name), srv.priority, srv.weight, srv.port);
 	} else if (rtype == MDNS_RECORDTYPE_A) {
+		char addrbuf2[64];
 		struct sockaddr_in addr;
 		mdns_record_parse_a(data, size, record_offset, record_length, &addr);
 		mdns_string_t addrstr =
-		    ipv4_address_to_string(namebuffer, sizeof(namebuffer), &addr, sizeof(addr));
+		    ipv4_address_to_string(addrbuf2, sizeof(addrbuf2), &addr, sizeof(addr));
 		printf("%.*s : %s %.*s A %.*s\n", MDNS_STRING_FORMAT(fromaddrstr), entrytype,
 		       MDNS_STRING_FORMAT(entrystr), MDNS_STRING_FORMAT(addrstr));
 	} else if (rtype == MDNS_RECORDTYPE_AAAA) {
+		char addrbuf2[64];
 		struct sockaddr_in6 addr;
 		mdns_record_parse_aaaa(data, size, record_offset, record_length, &addr);
 		mdns_string_t addrstr =
-		    ipv6_address_to_string(namebuffer, sizeof(namebuffer), &addr, sizeof(addr));
+		    ipv6_address_to_string(addrbuf2, sizeof(addrbuf2), &addr, sizeof(addr));
 		printf("%.*s : %s %.*s AAAA %.*s\n", MDNS_STRING_FORMAT(fromaddrstr), entrytype,
 		       MDNS_STRING_FORMAT(entrystr), MDNS_STRING_FORMAT(addrstr));
 	} else if (rtype == MDNS_RECORDTYPE_TXT) {
@@ -189,6 +199,9 @@ service_callback(int sock, const struct sockaddr* from, size_t addrlen, mdns_ent
 	const char dns_sd[] = "_services._dns-sd._udp.local.";
 	const service_t* service = (const service_t*)user_data;
 
+	char addrbuffer[64];
+	char namebuffer[256];
+	char sendbuffer[1024];
 	mdns_string_t fromaddrstr = ip_address_to_string(addrbuffer, sizeof(addrbuffer), from, addrlen);
 
 	size_t offset = name_offset;
@@ -209,10 +222,10 @@ service_callback(int sock, const struct sockaddr* from, size_t addrlen, mdns_ent
 		record_name = "ANY";
 	else
 		return 0;
-	printf("Query %s %.*s\n", record_name, MDNS_STRING_FORMAT(name));
+	printf("%.*s: Query %s %.*s\n", MDNS_STRING_FORMAT(fromaddrstr), record_name,
+	       MDNS_STRING_FORMAT(name));
 
-	if ((name.length == (sizeof(dns_sd) - 1)) &&
-	    (strncmp(name.str, dns_sd, sizeof(dns_sd) - 1) == 0)) {
+	if (mdns_string_match(name, dns_sd)) {
 		if ((rtype == MDNS_RECORDTYPE_PTR) || (rtype == MDNS_RECORDTYPE_ANY)) {
 			// The PTR query was for the DNS-SD domain, send answer with a PTR record for the
 			// service name we advertise, typically on the "<_service-name>._tcp.local." format
@@ -350,8 +363,9 @@ service_callback(int sock, const struct sockaddr* from, size_t addrlen, mdns_ent
 
 			// Send the answer, unicast or multicast depending on flag in query
 			uint16_t unicast = (rclass & MDNS_UNICAST_RESPONSE);
+			char addrbuf2[64];
 			mdns_string_t addrstr = ip_address_to_string(
-			    addrbuffer, sizeof(addrbuffer), (struct sockaddr*)&service->record_a.data.a.addr,
+			    addrbuf2, sizeof(addrbuf2), (struct sockaddr*)&service->record_a.data.a.addr,
 			    sizeof(service->record_a.data.a.addr));
 			printf("  --> answer %.*s IPv4 %.*s (%s)\n", MDNS_STRING_FORMAT(service->record_a.name),
 			       MDNS_STRING_FORMAT(addrstr), (unicast ? "unicast" : "multicast"));
@@ -387,8 +401,9 @@ service_callback(int sock, const struct sockaddr* from, size_t addrlen, mdns_ent
 
 			// Send the answer, unicast or multicast depending on flag in query
 			uint16_t unicast = (rclass & MDNS_UNICAST_RESPONSE);
+			char addrbuf2[64];
 			mdns_string_t addrstr =
-			    ip_address_to_string(addrbuffer, sizeof(addrbuffer),
+			    ip_address_to_string(addrbuf2, sizeof(addrbuf2),
 			                         (struct sockaddr*)&service->record_aaaa.data.aaaa.addr,
 			                         sizeof(service->record_aaaa.data.aaaa.addr));
 			printf("  --> answer %.*s IPv6 %.*s (%s)\n",
@@ -414,6 +429,8 @@ dump_callback(int sock, const struct sockaddr* from, size_t addrlen, mdns_entry_
               uint16_t query_id, uint16_t rtype, uint16_t rclass, uint32_t ttl, const void* data,
               size_t size, size_t name_offset, size_t name_length, size_t record_offset,
               size_t record_length, void* user_data) {
+	char addrbuffer[64];
+	char namebuffer[256];
 	mdns_string_t fromaddrstr = ip_address_to_string(addrbuffer, sizeof(addrbuffer), from, addrlen);
 
 	size_t offset = name_offset;
@@ -823,7 +840,6 @@ send_mdns_query(mdns_query_t* query, size_t count) {
 					if (rec > 0)
 						records += rec;
 				}
-				FD_SET(sockets[isock], &readfs);
 			}
 		}
 	} while (res > 0);
